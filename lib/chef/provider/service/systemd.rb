@@ -95,7 +95,7 @@ class Chef::Provider::Service::Systemd < Chef::Provider::Service::Simple
     unless status.key?('UnitFileState') && status.key?('ActiveState')
       raise Mixlib::ShellOut::ShellCommandFailed, "'#{systemctl_path} show' not reporting status for #{new_resource.service_name}!"
     end
-    #Chef::Log.info("JOSH: shelled out to systemctl for status for #{new_resource.service_name}: got #{status}")
+    # Chef::Log.info("JOSH: shelled out to systemctl for status for #{new_resource.service_name}: got #{status}")
     @service_status = status
     return status
   end
