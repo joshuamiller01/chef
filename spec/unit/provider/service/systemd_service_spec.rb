@@ -297,6 +297,57 @@ describe Chef::Provider::Service::Systemd do
         end
       end
 
+      enabled_and_active = {
+        'UnitFileState' => 'enabled',
+        'ActiveState' => 'active',
+      }
+      disabled_and_inactive = {
+        'UnitFileState' => 'disabled',
+        'ActiveState' => 'inactive',
+      }
+      # No unit known for this service, and inactive
+      nil_and_inactive = {
+        'ActiveState' => 'inactive',
+        'UnitFileState' => nil,
+      }
+      describe "systemd_service_status" do
+        before(:each) do
+          provider.current_resource = current_resource
+          current_resource.service_name(service_name)
+        end
+
+        it "should return status if '#{systemctl_path} --system show -p UnitFileState -p ActiveState service_name' returns 0" do
+          systemd_stdout = <<-STDOUT
+            ActiveState=active
+            UnitFileState=enabled
+          STDOUT
+          allow(provider).to receive(:shell_out!).with("#{systemctl_path} --system show -p UnitFileState -p ActiveState #{service_name}", {}).and_return(double(stdout: systemd_stdout, exitstatus: 0, error?: false))
+          expect(provider.systemd_service_status).to eql(enabled_and_active)
+        end
+
+        it "should return status if '#{systemctl_path} --system show -p UnitFileState -p ActiveState service_name' returns 0 and has nil" do
+          systemd_stdout = <<-STDOUT
+            ActiveState=inactive
+            UnitFileState=
+          STDOUT
+          allow(provider).to receive(:shell_out!).with("#{systemctl_path} --system show -p UnitFileState -p ActiveState #{service_name}", {}).and_return(double(stdout: systemd_stdout, exitstatus: 0, error?: false))
+          expect(provider.systemd_service_status).to eql(nil_and_inactive)
+        end
+
+        it "should error if '#{systemctl_path} --system show -p UnitFileState -p ActiveState service_name' misses fields" do
+          systemd_stdout = <<-STDOUT
+            ActiveState=inactive
+          STDOUT
+          allow(provider).to receive(:shell_out!).with("#{systemctl_path} --system show -p UnitFileState -p ActiveState #{service_name}", {}).and_return(double(stdout: systemd_stdout, exitstatus: 0, error?: false))
+          expect{provider.systemd_service_status}.to raise_error(Mixlib::ShellOut::ShellCommandFailed)
+        end
+
+        it "should error if '#{systemctl_path} --system show -p UnitFileState -p ActiveState service_name' returns non 0" do
+          allow(provider).to receive(:shell_out!).with("#{systemctl_path} --system show -p UnitFileState -p ActiveState #{service_name}", {}).and_raise(Mixlib::ShellOut::ShellCommandFailed)
+          expect{provider.systemd_service_status}.to raise_error(Mixlib::ShellOut::ShellCommandFailed)
+        end
+      end
+
       describe "is_active?" do
         before(:each) do
           provider.current_resource = current_resource
@@ -304,13 +355,22 @@ describe Chef::Provider::Service::Systemd do
           allow(provider).to receive(:which).with("systemctl").and_return(systemctl_path.to_s)
         end
 
-        it "should return true if '#{systemctl_path} --system is-active service_name' returns 0" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-active", service_name, "--quiet", timeout: 900).and_return(shell_out_success)
+        it "should return true if service is active" do
+          allow(provider).to receive(:systemd_service_status).and_return(enabled_and_active)
           expect(provider.is_active?).to be true
         end
 
-        it "should return false if '#{systemctl_path} --system is-active service_name' returns anything except 0" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-active", service_name, "--quiet", timeout: 900).and_return(shell_out_failure)
+        it "should return false if service is not active" do
+          allow(provider).to receive(:systemd_service_status).and_return(disabled_and_inactive)
+          expect(provider.is_active?).to be false
+        end
+
+        it "should return false if service is activating" do
+          enabled_and_activating = {
+            'UnitFileState' => 'enabled',
+            'ActiveState' => 'activating',
+          }
+          allow(provider).to receive(:systemd_service_status).and_return(enabled_and_activating)
           expect(provider.is_active?).to be false
         end
       end
@@ -322,13 +382,36 @@ describe Chef::Provider::Service::Systemd do
           allow(provider).to receive(:which).with("systemctl").and_return(systemctl_path.to_s)
         end
 
-        it "should return true if '#{systemctl_path} --system is-enabled service_name' returns 0" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, "--quiet", timeout: 900).and_return(shell_out_success)
+        it "should return true if service is enabled" do
+          allow(provider).to receive(:systemd_service_status).and_return(enabled_and_active)
           expect(provider.is_enabled?).to be true
         end
 
-        it "should return false if '#{systemctl_path} --system is-enabled service_name' returns anything except 0" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, "--quiet", timeout: 900).and_return(shell_out_failure)
+        it "should return false if service is disabled" do
+          allow(provider).to receive(:systemd_service_status).and_return(disabled_and_inactive)
+          expect(provider.is_enabled?).to be false
+        end
+
+        it "should return false if service has no unit file" do
+          allow(provider).to receive(:systemd_service_status).and_return(nil_and_inactive)
+          expect(provider.is_enabled?).to be false
+        end
+
+        it "should return true if service is static" do
+          static_and_active = {
+            'UnitFileState' => 'static',
+            'ActiveState' => 'active',
+          }
+          allow(provider).to receive(:systemd_service_status).and_return(static_and_active)
+          expect(provider.is_enabled?).to be true
+        end
+
+        it "should return false if service is enabled-runtime" do
+          enabled_runtime_and_active = {
+            'UnitFileState' => 'enabled-runtime',
+            'ActiveState' => 'active',
+          }
+          allow(provider).to receive(:systemd_service_status).and_return(enabled_runtime_and_active)
           expect(provider.is_enabled?).to be false
         end
       end
@@ -340,23 +423,31 @@ describe Chef::Provider::Service::Systemd do
           allow(provider).to receive(:which).with("systemctl").and_return(systemctl_path.to_s)
         end
 
-        it "should return true if '#{systemctl_path} --system is-enabled service_name' returns 'masked' and returns anything except 0" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, timeout: 900).and_return(double(stdout: "masked", exitstatus: shell_out_failure))
+        it "should return true if service is masked" do
+          masked_and_inactive = {
+            'ActiveState' => 'inactive',
+            'UnitFileState' => 'masked',
+          }
+          allow(provider).to receive(:systemd_service_status).and_return(masked_and_inactive)
           expect(provider.is_masked?).to be true
         end
 
-        it "should return true if '#{systemctl_path} --system is-enabled service_name' outputs 'masked-runtime' and returns anything except 0" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, timeout: 900).and_return(double(stdout: "masked-runtime", exitstatus: shell_out_failure))
-          expect(provider.is_masked?).to be true
-        end
-
-        it "should return false if '#{systemctl_path} --system is-enabled service_name' returns 0" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, timeout: 900).and_return(double(stdout: "enabled", exitstatus: shell_out_success))
+        it "should return false if service is masked-runtime" do
+          masked_runtime_and_inactive = {
+            'ActiveState' => 'inactive',
+            'UnitFileState' => 'masked-runtime',
+          }
+          allow(provider).to receive(:systemd_service_status).and_return(masked_runtime_and_inactive)
           expect(provider.is_masked?).to be false
         end
 
-        it "should return false if '#{systemctl_path} --system is-enabled service_name' returns anything except 0 and outputs an error'" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, timeout: 900).and_return(double(stdout: "Failed to get unit file state for #{service_name}: No such file or directory", exitstatus: shell_out_failure))
+        it "should return false if service is enabled" do
+          allow(provider).to receive(:systemd_service_status).and_return(enabled_and_active)
+          expect(provider.is_masked?).to be false
+        end
+
+        it "should return false if service has no known unit file" do
+          allow(provider).to receive(:systemd_service_status).and_return(nil_and_inactive)
           expect(provider.is_masked?).to be false
         end
       end
@@ -368,18 +459,22 @@ describe Chef::Provider::Service::Systemd do
           allow(provider).to receive(:which).with("systemctl").and_return(systemctl_path.to_s)
         end
 
-        it "should return true if '#{systemctl_path} --system is-enabled service_name' returns 'indirect'" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, timeout: 900).and_return(double(stdout: "indirect", exitstatus: shell_out_success))
+        it "should return true if service is indirect" do
+          indirect_and_inactive = {
+            'ActiveState' => 'inactive',
+            'UnitFileState' => 'indirect',
+          }
+          allow(provider).to receive(:systemd_service_status).and_return(indirect_and_inactive)
           expect(provider.is_indirect?).to be true
         end
 
-        it "should return false if '#{systemctl_path} --system is-enabled service_name' returns 0 and outputs something other than 'indirect'" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, timeout: 900).and_return(double(stdout: "enabled", exitstatus: shell_out_success))
+        it "should return false if service not indirect" do
+          allow(provider).to receive(:systemd_service_status).and_return(enabled_and_active)
           expect(provider.is_indirect?).to be false
         end
 
-        it "should return false if '#{systemctl_path} --system is-enabled service_name' returns anything except 0 and outputs somethign other than 'indirect''" do
-          expect(provider).to receive(:shell_out_compacted).with(systemctl_path, "--system", "is-enabled", service_name, timeout: 900).and_return(double(stdout: "enabled", exitstatus: shell_out_failure))
+        it "should return false if service has no known unit file" do
+          allow(provider).to receive(:systemd_service_status).and_return(nil_and_inactive)
           expect(provider.is_indirect?).to be false
         end
       end
